@@ -3,6 +3,11 @@
 parser (the same mechanism Triton uses), against the official
 `model_config.proto`. No Triton install required.
 
+The proto is Triton's own file (triton-inference-server/common, BSD-3). It is
+not vendored: it is downloaded on first use into tools/_proto/<ref>/ (git-ignored),
+pinned to the Triton release used in docker/docker-compose.yaml. Override
+with --triton-ref or TRITON_PROTO_REF.
+
 Generic checks run here; family-specific checks are delegated to
 `backends/<family>/triton_repo.py:check(conf, meta)`.
 
@@ -14,13 +19,39 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402
+
+
+# Keep in sync with the tritonserver image tag in docker/docker-compose.yaml
+# (nvcr.io/nvidia/tritonserver:26.03-py3 -> branch r26.03).
+TRITON_PROTO_REF = "r26.03"
+PROTO_URL = "https://raw.githubusercontent.com/triton-inference-server/common/{ref}/protobuf/model_config.proto"
+
+
+def fetch_proto(ref: str) -> Path:
+    """Return a dir holding Triton's model_config.proto for `ref`, downloading
+    it once into tools/_proto/<ref>/."""
+    proto_dir = Path(__file__).resolve().parent / "_proto" / ref
+    proto = proto_dir / "model_config.proto"
+    if not proto.exists():
+        url = PROTO_URL.format(ref=ref)
+        print(f"fetching {url}")
+        try:
+            with urllib.request.urlopen(url, timeout=30) as resp:
+                data = resp.read()
+        except Exception as e:
+            sys.exit(f"cannot download Triton model_config.proto ({url}): {e}")
+        proto_dir.mkdir(parents=True, exist_ok=True)
+        proto.write_bytes(data)
+    return proto_dir
 
 
 def compile_pb2(proto_dir: Path) -> Path:
@@ -43,14 +74,11 @@ def load_pb2(out_dir: Path):
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--repo", type=Path, default=common.ROOT / "triton" / "model_repository")
+    p.add_argument("--triton-ref", default=os.environ.get("TRITON_PROTO_REF", TRITON_PROTO_REF),
+                   help=f"triton-inference-server/common branch/tag (default {TRITON_PROTO_REF})")
     args = p.parse_args()
 
-    here = Path(__file__).resolve().parent
-    proto_dir = here / "_proto"
-    if not (proto_dir / "model_config.proto").exists():
-        sys.exit("missing tools/_proto/model_config.proto (download from triton-inference-server/common)")
-
-    mc = load_pb2(compile_pb2(proto_dir))
+    mc = load_pb2(compile_pb2(fetch_proto(args.triton_ref)))
     backends = common.load_backend_modules()
     from google.protobuf import text_format
 

@@ -12,6 +12,7 @@
 
 services:
   triton:
+    # When bumping, also bump TRITON_PROTO_REF in tools/verify_repo.py (r26.03).
     image: nvcr.io/nvidia/tritonserver:26.03-py3
     command: tritonserver --model-repository=/models
     volumes:
