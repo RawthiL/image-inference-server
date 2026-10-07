@@ -32,6 +32,9 @@ services:
               capabilities: [gpu]
 
   gateway:
+    # `docker compose up --build` builds it locally instead; to use a release:
+    #   GATEWAY_TAG=0.2.0 docker compose pull gateway && docker compose up -d --no-build
+    image: ghcr.io/rawthil/image-inference-server:${GATEWAY_TAG:-latest}
     build:
       context: ..
       dockerfile: docker/Dockerfile.gateway
