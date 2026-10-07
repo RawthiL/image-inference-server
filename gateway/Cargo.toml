@@ -1,0 +1,36 @@
+[package]
+name = "gateway"
+description = "Ultralytics-compatible /predict gateway in front of Triton; model-agnostic."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Each model backend is an optional, self-contained crate under backends/.
+# Build a gateway with only the families you are licensed to serve, e.g.
+#   cargo build --release -p gateway --no-default-features --features rfdetr
+[features]
+default = ["yolo", "rfdetr"]
+yolo = ["dep:backend-yolo"]
+rfdetr = ["dep:backend-rfdetr"]
+
+[dependencies]
+backend-api.workspace = true
+backend-yolo = { workspace = true, optional = true }
+backend-rfdetr = { workspace = true, optional = true }
+axum = { version = "0.8", features = ["multipart"] }
+base64 = "0.23.1"
+image = { workspace = true, features = ["jpeg", "png", "webp", "bmp", "tiff"] }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9.34"
+subtle = "2.6.1"
+thiserror.workspace = true
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream", "multipart", "form"] }
+tokio = { version = "1.53.2", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+form_urlencoded = "1.2.2"
+
+[dev-dependencies]
+futures-util = "0.3.34"

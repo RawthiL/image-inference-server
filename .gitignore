@@ -1,0 +1,27 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Generated Triton model artifacts (produce with backends/<family>/export.py
+# or tools/make_fixtures.py)
+triton/model_repository/*
+triton/exports/
+_proto
+
+# Secrets / local overrides
+config.yaml
+*.local.yaml
+
+# Custom
+untracked

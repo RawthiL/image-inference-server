@@ -1,0 +1,371 @@
+{
+ "title": "Ultralytics Platform API \u2014 vendored response fragments",
+ "source": "https://platform.ultralytics.com/openapi.json (v0.1.80)",
+ "$defs": {
+  "PredictResponse": {
+   "type": "object",
+   "properties": {
+    "images": {
+     "type": "array",
+     "items": {
+      "type": "object",
+      "properties": {
+       "shape": {
+        "minItems": 2,
+        "maxItems": 2,
+        "type": "array",
+        "items": {
+         "type": "number"
+        },
+        "description": "Original image shape [height, width]"
+       },
+       "speed": {
+        "type": "object",
+        "properties": {
+         "preprocess": {
+          "type": "number",
+          "description": "Preprocessing time (ms)"
+         },
+         "inference": {
+          "type": "number",
+          "description": "Inference time (ms)"
+         },
+         "postprocess": {
+          "type": "number",
+          "description": "Postprocessing time (ms)"
+         }
+        },
+        "required": [
+         "preprocess",
+         "inference",
+         "postprocess"
+        ],
+        "additionalProperties": false,
+        "description": "Timing breakdown"
+       },
+       "results": {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "properties": {
+          "name": {
+           "type": "string",
+           "description": "Class name"
+          },
+          "class": {
+           "type": "integer",
+           "description": "Class index"
+          },
+          "confidence": {
+           "description": "Detection confidence",
+           "type": "number",
+           "minimum": 0,
+           "maximum": 1
+          },
+          "pixel_ratio": {
+           "description": "Semantic segmentation pixel coverage for this class",
+           "type": "number",
+           "minimum": 0,
+           "maximum": 1
+          },
+          "box": {
+           "description": "Bounding box (pixel coordinates by default, normalized if normalize=true)",
+           "type": "object",
+           "properties": {
+            "x1": {
+             "type": "number",
+             "description": "Left x coordinate (pixels or normalized)"
+            },
+            "y1": {
+             "type": "number",
+             "description": "Top y coordinate (pixels or normalized)"
+            },
+            "x2": {
+             "type": "number",
+             "description": "Right x coordinate (pixels or normalized)"
+            },
+            "y2": {
+             "type": "number",
+             "description": "Bottom y coordinate (pixels or normalized)"
+            },
+            "x3": {
+             "description": "OBB corner 3 x coordinate",
+             "type": "number"
+            },
+            "y3": {
+             "description": "OBB corner 3 y coordinate",
+             "type": "number"
+            },
+            "x4": {
+             "description": "OBB corner 4 x coordinate",
+             "type": "number"
+            },
+            "y4": {
+             "description": "OBB corner 4 y coordinate",
+             "type": "number"
+            }
+           },
+           "required": [
+            "x1",
+            "y1",
+            "x2",
+            "y2"
+           ],
+           "additionalProperties": false
+          },
+          "segments": {
+           "description": "Segmentation coordinates",
+           "type": "object",
+           "properties": {
+            "x": {
+             "type": "array",
+             "items": {
+              "type": "number"
+             },
+             "description": "X coordinates of segment"
+            },
+            "y": {
+             "type": "array",
+             "items": {
+              "type": "number"
+             },
+             "description": "Y coordinates of segment"
+            }
+           },
+           "required": [
+            "x",
+            "y"
+           ],
+           "additionalProperties": false
+          },
+          "keypoints": {
+           "description": "Pose keypoints",
+           "type": "object",
+           "properties": {
+            "x": {
+             "type": "array",
+             "items": {
+              "type": "number"
+             },
+             "description": "X coordinates of keypoints"
+            },
+            "y": {
+             "type": "array",
+             "items": {
+              "type": "number"
+             },
+             "description": "Y coordinates of keypoints"
+            },
+            "visible": {
+             "description": "Visibility scores (0-2), omitted for 2-step keypoint formats",
+             "type": "array",
+             "items": {
+              "type": "number"
+             }
+            }
+           },
+           "required": [
+            "x",
+            "y"
+           ],
+           "additionalProperties": false
+          }
+         },
+         "required": [
+          "name",
+          "class"
+         ],
+         "additionalProperties": false,
+         "description": "Single prediction result from inference"
+        },
+        "description": "Detection results"
+       },
+       "semantic_mask": {
+        "description": "Semantic segmentation class-map (pixel value = class id)",
+        "type": "object",
+        "properties": {
+         "shape": {
+          "minItems": 2,
+          "maxItems": 2,
+          "type": "array",
+          "items": {
+           "type": "number"
+          },
+          "description": "Pixel-map shape [height, width]"
+         },
+         "encoding": {
+          "type": "string",
+          "const": "png",
+          "description": "Pixel-map encoding"
+         },
+         "data": {
+          "type": "string",
+          "description": "Base64-encoded grayscale PNG"
+         }
+        },
+        "required": [
+         "shape",
+         "encoding",
+         "data"
+        ],
+        "additionalProperties": false
+       },
+       "depth": {
+        "description": "Depth map as grayscale PNG: depth = pixel \u00d7 max / divisor, 0 = no depth",
+        "type": "object",
+        "properties": {
+         "shape": {
+          "minItems": 2,
+          "maxItems": 2,
+          "type": "array",
+          "items": {
+           "type": "number"
+          },
+          "description": "Pixel-map shape [height, width]"
+         },
+         "encoding": {
+          "type": "string",
+          "const": "png",
+          "description": "Pixel-map encoding"
+         },
+         "data": {
+          "type": "string",
+          "description": "Base64-encoded grayscale PNG"
+         },
+         "min": {
+          "type": "number",
+          "description": "Minimum valid predicted depth"
+         },
+         "max": {
+          "type": "number",
+          "description": "Maximum valid predicted depth"
+         },
+         "bits": {
+          "anyOf": [
+           {
+            "type": "number",
+            "const": 8
+           },
+           {
+            "type": "number",
+            "const": 12
+           },
+           {
+            "type": "number",
+            "const": 16
+           }
+          ],
+          "description": "Depth quantization: 8 = uint8 PNG; 12 or 16 = uint16 PNG"
+         }
+        },
+        "required": [
+         "shape",
+         "encoding",
+         "data",
+         "min",
+         "max",
+         "bits"
+        ],
+        "additionalProperties": false
+       }
+      },
+      "required": [
+       "shape",
+       "speed",
+       "results"
+      ],
+      "additionalProperties": false
+     },
+     "description": "Results for each image/frame"
+    },
+    "metadata": {
+     "type": "object",
+     "properties": {
+      "imageCount": {
+       "type": "integer",
+       "minimum": 0,
+       "description": "Number of images processed"
+      },
+      "classNames": {
+       "description": "Class names from the loaded model, indexed by class ID",
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      },
+      "functionTimeAlive": {
+       "type": "number",
+       "description": "Time since service started (seconds)"
+      },
+      "functionTimeCall": {
+       "type": "number",
+       "description": "Time for this call (seconds)"
+      },
+      "model": {
+       "description": "Model path used, when the predict service reports one",
+       "type": "string"
+      },
+      "task": {
+       "description": "YOLO task type returned by the loaded model",
+       "anyOf": [
+        {
+         "type": "string",
+         "enum": [
+          "detect",
+          "segment",
+          "semantic",
+          "depth",
+          "classify",
+          "pose",
+          "obb"
+         ],
+         "description": "YOLO task type"
+        },
+        {
+         "type": "null"
+        }
+       ]
+      },
+      "version": {
+       "type": "object",
+       "propertyNames": {
+        "type": "string"
+       },
+       "additionalProperties": {
+        "type": "string"
+       },
+       "description": "Version information"
+      }
+     },
+     "required": [
+      "imageCount",
+      "functionTimeAlive",
+      "functionTimeCall",
+      "version"
+     ],
+     "additionalProperties": false
+    }
+   },
+   "required": [
+    "images",
+    "metadata"
+   ],
+   "additionalProperties": false
+  },
+  "ErrorResponse": {
+   "type": "object",
+   "properties": {
+    "error": {
+     "type": "string",
+     "description": "Error message",
+     "example": "Invalid request"
+    }
+   },
+   "required": [
+    "error"
+   ],
+   "additionalProperties": false,
+   "description": "Standard error response"
+  }
+ }
+}

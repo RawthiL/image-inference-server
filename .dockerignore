@@ -1,0 +1,8 @@
+# Keep the gateway build context small: no build output, weights or venvs.
+target/
+triton/
+.venv/
+.git/
+**/__pycache__/
+config.yaml
+*.local.yaml

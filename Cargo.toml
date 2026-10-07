@@ -1,0 +1,22 @@
+# Workspace layout (see README "Architecture"):
+#   gateway/        model-agnostic Ultralytics-compatible HTTP interface (binary)
+#   backend-api/    the contract every model backend implements
+#   backends/<x>/   one self-contained folder per model family
+[workspace]
+resolver = "3"
+members = ["gateway", "backend-api", "backends/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+
+[workspace.dependencies]
+backend-api = { path = "backend-api" }
+backend-yolo = { path = "backends/yolo" }
+backend-rfdetr = { path = "backends/rfdetr" }
+image = { version = "0.25.10", default-features = false }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.21"

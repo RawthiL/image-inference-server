@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1
+# Build the model-agnostic /predict gateway.
+# Build context must be the repo root:
+#   docker build -f docker/Dockerfile.gateway -t image-inference-gateway .
+# Pick which backends are compiled in (default: all):
+#   docker build --build-arg FEATURES=rfdetr -f docker/Dockerfile.gateway .
+
+# Builder and runtime share the same Debian release so glibc matches.
+FROM rust:1-slim-bookworm AS build
+ARG FEATURES="yolo rfdetr"
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY backend-api ./backend-api
+COPY backends ./backends
+COPY gateway ./gateway
+RUN cargo build --release --locked -p gateway --no-default-features --features "${FEATURES}"
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+RUN useradd -r -u 10001 gateway
+COPY --from=build /src/target/release/gateway /usr/local/bin/gateway
+USER gateway
+EXPOSE 8080
+HEALTHCHECK --interval=10s --timeout=3s --retries=5 \
+    CMD curl -fsS http://127.0.0.1:8080/health || exit 1
+ENV GATEWAY_CONFIG=/app/config.yaml
+ENTRYPOINT ["/usr/local/bin/gateway"]
+CMD ["--config", "/app/config.yaml"]

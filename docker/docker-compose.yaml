@@ -1,0 +1,51 @@
+# Triton (any backend's ONNX) behind the model-agnostic Rust gateway.
+#
+#   (generate models first, from the repo root:
+#      uv run --extra onnx python tools/make_fixtures.py          # smoke fixtures
+#    or with real weights: backends/<family>/export.py)
+#   cp config.example.yaml config.yaml   # then edit keys/default_model
+#   cd docker && docker compose up --build
+#
+# Clients then hit  http://localhost:8080/predict  (OpenAPI-compatible).
+# Triton's own ports stay internal (gateway network only) — the gateway is the
+# single authenticated entrypoint.
+
+services:
+  triton:
+    image: nvcr.io/nvidia/tritonserver:26.03-py3
+    command: tritonserver --model-repository=/models
+    volumes:
+      - ../triton/model_repository:/models:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/v2/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+    # GPU (onnxruntime-gpu is built into this image). Requires
+    # nvidia-container-toolkit on the daemon; comment out for CPU-only runs.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.gateway
+      args:
+        FEATURES: "${GATEWAY_FEATURES:-yolo rfdetr}"   # backends compiled in
+    depends_on:
+      triton:
+        condition: service_healthy
+    environment:
+      # Overrides triton.url from config.yaml (which may point at a local dev
+      # mock); inside compose Triton is always the `triton` service.
+      TRITON_URL: "http://triton:8000"
+    volumes:
+      - ../config.yaml:/app/config.yaml:ro
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    restart: unless-stopped
