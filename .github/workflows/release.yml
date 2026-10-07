@@ -51,7 +51,7 @@ jobs:
           enable-cache: true
 
       - name: Full test suite
-        run: ./scripts/test-all.sh
+        run: bash scripts/test-all.sh
 
   publish:
     name: Build and push image

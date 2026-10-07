@@ -259,7 +259,7 @@ The step-by-step guide is in [`backends/README.md`](backends/README.md).
 ## Tests
 
 ```bash
-./scripts/test-all.sh     # runs everything below
+bash scripts/test-all.sh   # runs everything below
 ```
 
 ```bash
