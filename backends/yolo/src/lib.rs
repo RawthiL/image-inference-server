@@ -132,13 +132,12 @@ impl Backend for Yolo {
         util::require_len(out, rows * 6)?;
 
         let mut dets = Vec::new();
-        for r in out.data[..rows * 6].chunks_exact(6) {
-            let conf = r[4] as f64;
-            let class = r[5] as i64;
+        for &[x1, y1, x2, y2, conf, class] in out.data[..rows * 6].as_chunks::<6>().0 {
+            let (conf, class) = (conf as f64, class as i64);
             if class < 0 || conf <= 0.0 || conf < params.conf {
                 continue;
             }
-            let b = map.to_original(r[0] as f64, r[1] as f64, r[2] as f64, r[3] as f64);
+            let b = map.to_original(x1 as f64, y1 as f64, x2 as f64, y2 as f64);
             dets.push(clamped(class, conf, b, map.orig_w, map.orig_h));
         }
         Ok(finish(dets, params.max_det))
