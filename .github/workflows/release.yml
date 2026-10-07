@@ -46,7 +46,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0  # publishes full version tags only (no moving v10)
         with:
           enable-cache: true
 
