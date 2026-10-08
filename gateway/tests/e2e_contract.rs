@@ -245,6 +245,13 @@ async fn spawn_gateway(triton_addr: SocketAddr, model: &str) -> SocketAddr {
     spawn_gateway_with(triton_addr, model, true).await
 }
 
+/// Gateway with URL sources disabled (the production default).
+async fn spawn_gateway_no_urls(triton_addr: SocketAddr, model: &str) -> SocketAddr {
+    let (addr, state) = start_gateway_cfg(triton_addr, model, true, false).await;
+    wait_ready(&state).await;
+    addr
+}
+
 async fn spawn_gateway_with(
     triton_addr: SocketAddr,
     model: &str,
@@ -255,11 +262,20 @@ async fn spawn_gateway_with(
     addr
 }
 
-/// Start a gateway without waiting for its model to load.
+/// Start a gateway (URL sources enabled) without waiting for its model to load.
 async fn start_gateway(
     triton_addr: SocketAddr,
     model: &str,
     allow_private: bool,
+) -> (SocketAddr, Arc<gateway::api::AppState>) {
+    start_gateway_cfg(triton_addr, model, allow_private, true).await
+}
+
+async fn start_gateway_cfg(
+    triton_addr: SocketAddr,
+    model: &str,
+    allow_private: bool,
+    allow_url: bool,
 ) -> (SocketAddr, Arc<gateway::api::AppState>) {
     let cfg_text = format!(
         r#"
@@ -272,6 +288,7 @@ api_keys: ["test-key-1", "test-key-2"]
 limits:
   max_upload_mb: 4
   url_timeout_ms: 3000
+  allow_url_sources: {allow_url}
   allow_private_urls: {allow_private}
 defaults: {{ conf: 0.25, iou: 0.7 }}
 "#
@@ -852,4 +869,38 @@ async fn triton_inference_error_is_json_503() {
         v["error"].as_str().unwrap().contains("CUDA out of memory"),
         "{v}"
     );
+}
+
+#[tokio::test]
+async fn url_sources_disabled_by_config() {
+    let jpeg = make_test_jpeg();
+    std::fs::write(test_image_path(), &jpeg).unwrap();
+    let (mock_addr, _m) = spawn_mock().await;
+    let addr = spawn_gateway_no_urls(mock_addr, "yolo26n").await;
+
+    // URL source -> 400, without any outbound fetch.
+    let mp = reqwest::multipart::Form::new().text("source", format!("http://{mock_addr}/image"));
+    let (status, v) = post_predict(addr, "test-key-1", mp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap()
+            .contains("image URLs are disabled"),
+        "{v}"
+    );
+
+    // Payload images still work: file upload and base64 source.
+    let (status, _) = post_predict(addr, "test-key-1", mp_file(&jpeg)).await;
+    assert_eq!(status, StatusCode::OK);
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(make_small_jpeg());
+    let mp = reqwest::multipart::Form::new().text("source", b64);
+    let (status, v) = post_predict(addr, "test-key-1", mp).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+}
+
+#[test]
+fn url_sources_are_off_by_default() {
+    assert!(!gateway::config::Limits::default().allow_url_sources);
 }

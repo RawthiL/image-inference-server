@@ -1,6 +1,11 @@
 //! Resolve the `source` form field (image URL or base64) into image bytes,
 //! with SSRF protection for URL fetches.
 //!
+//! URL sources are only accepted when `limits.allow_url_sources` is true (off
+//! by default): fetching lets callers make the node download arbitrary public
+//! content from its own IP, costs egress, and can make relays
+//! non-deterministic across suppliers.
+//!
 //! SSRF model (when `allow_private_urls` is false):
 //! - every hostname the HTTP client connects to — the initial URL *and* every
 //!   redirect hop — goes through [`PublicOnlyResolver`], so the address that
@@ -34,6 +39,13 @@ pub async fn resolve_source(
         return decode_base64(b64);
     }
     if source.starts_with("http://") || source.starts_with("https://") {
+        if !limits.allow_url_sources {
+            return Err(ApiError::BadRequest(
+                "image URLs are disabled on this server; send the image as 'file' \
+                 or as base64 in 'source'"
+                    .into(),
+            ));
+        }
         fetch_url(client, source, limits).await
     } else {
         decode_base64(source)

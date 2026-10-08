@@ -29,6 +29,10 @@ api_keys:
 
 limits:
   max_upload_mb: 20
+  # Accept `source` as an http(s) image URL (the gateway downloads it).
+  # Off by default: only images in the payload (`file` or base64 `source`).
+  # Enabling it lets callers make this node fetch arbitrary public URLs.
+  allow_url_sources: false
   url_timeout_ms: 10000         # when source is an http(s) URL
   allow_private_urls: false     # SSRF guard (DNS + redirects); true = dev only
   max_image_pixels: 40000000    # width*height cap, checked before decoding

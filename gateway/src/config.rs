@@ -58,6 +58,9 @@ fn default_timeout_ms() -> u64 {
 #[serde(default, deny_unknown_fields)]
 pub struct Limits {
     pub max_upload_mb: u64,
+    /// Accept `source` as an http(s) URL (the gateway then downloads it).
+    /// Off by default: the server only accepts images in the request payload.
+    pub allow_url_sources: bool,
     pub url_timeout_ms: u64,
     /// Allow `source` URLs resolving to private/loopback ranges (dev only).
     pub allow_private_urls: bool,
@@ -69,6 +72,7 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             max_upload_mb: 20,
+            allow_url_sources: false,
             url_timeout_ms: 10_000,
             allow_private_urls: false,
             max_image_pixels: 40_000_000,

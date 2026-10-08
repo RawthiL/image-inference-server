@@ -195,7 +195,7 @@ The request body is `multipart/form-data` or `application/x-www-form-urlencoded`
 | Field | Notes |
 |-------|-------|
 | `file` | Image upload (multipart only). JPEG, PNG, WebP, BMP, TIFF |
-| `source` | Alternative to `file`: `http(s)` URL, base64 string, or `data:` URI (max 4096 characters) |
+| `source` | Alternative to `file`: base64 string or `data:` URI (max 4096 characters). `http(s)` URLs only if the operator enables `limits.allow_url_sources` |
 | `conf` | Confidence threshold, 0.01 to 1 (default from config) |
 | `iou` | Accepted for compatibility, 0 to 0.95. Both current backends are NMS-free, so it is ignored |
 | `imgsz` | Accepted for compatibility, 32 to 1280. Inference always runs at the model's native size |
@@ -218,7 +218,13 @@ batcher (configured by the exporter) groups concurrent requests on the GPU.
 
 - Bearer API keys are compared in constant time. The gateway refuses to start
   with an empty key list.
-- `source` URL fetching is guarded against server-side request forgery
+- **Image URLs are off by default.** Only images in the request payload are
+  accepted (`file`, or base64 in `source`); an `http(s)` URL in `source`
+  returns `400`. Fetching URLs would let any caller make the node download
+  arbitrary public content from its own IP, costs egress bandwidth, and can
+  make answers differ between suppliers if the content behind a URL changes.
+  Operators can opt in with `limits.allow_url_sources: true`.
+- When enabled, URL fetching is guarded against server-side request forgery
   (SSRF). Every connection, including each redirect hop, is resolved through
   a resolver that rejects private, loopback, link-local, CGNAT, reserved and
   IPv4-embedding IPv6 addresses. IP-literal URLs and redirects are checked
@@ -239,7 +245,7 @@ See [`config.example.yaml`](config.example.yaml). Key fields:
   exported models freely; the backend is selected automatically.
 - `api_keys`: accepted `Bearer` keys.
 - `triton.url` / `triton.api_key` / `triton.timeout_ms`: Triton endpoint. The `TRITON_URL` env var overrides `triton.url`; `docker/docker-compose.yaml` sets it to `http://triton:8000`, so a dev `config.yaml` pointing at localhost still works in containers.
-- `limits.*`: upload cap, URL fetch timeout, SSRF guard, pixel cap.
+- `limits.*`: upload cap, pixel cap, URL sources (`allow_url_sources`, off by default), URL fetch timeout, SSRF guard.
 - `defaults.*`: `conf` / `iou` / `decimals` used when a request omits them.
 
 ## Adding a model backend
