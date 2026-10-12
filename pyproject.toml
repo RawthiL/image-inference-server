@@ -1,6 +1,6 @@
 [project]
 name = "image-inference-server"
-version = "0.1.1"
+version = "0.2.0"
 description = "Tooling for a model-agnostic, Ultralytics-compatible /predict gateway (Rust) in front of Triton."
 license = "MIT"
 readme = "README.md"

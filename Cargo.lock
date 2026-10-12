@@ -107,7 +107,7 @@ dependencies = [
 
 [[package]]
 name = "backend-api"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "image",
  "serde",
@@ -117,7 +117,7 @@ dependencies = [
 
 [[package]]
 name = "backend-ppocr"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "backend-api",
  "serde",
@@ -126,7 +126,7 @@ dependencies = [
 
 [[package]]
 name = "backend-rfdetr"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "backend-api",
  "serde",
@@ -135,7 +135,7 @@ dependencies = [
 
 [[package]]
 name = "backend-yolo"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "backend-api",
  "serde",
@@ -434,7 +434,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "axum",
  "backend-api",
