@@ -89,7 +89,7 @@ jobs:
             latest=${{ github.event_name == 'release' && !github.event.release.prerelease }}
           labels: |
             org.opencontainers.image.title=image-inference-server gateway
-            org.opencontainers.image.description=Model-agnostic, Ultralytics-compatible /predict gateway for Triton (Pocket Network backend)
+            org.opencontainers.image.description=Model-agnostic gateway for Triton (Pocket Network backend): Ultralytics-compatible detection, Cloud Vision-compatible OCR
             org.opencontainers.image.licenses=MIT
 
       - id: build
@@ -99,7 +99,7 @@ jobs:
           file: docker/Dockerfile.gateway
           platforms: linux/amd64
           build-args: |
-            FEATURES=yolo rfdetr
+            FEATURES=yolo rfdetr ppocr
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
