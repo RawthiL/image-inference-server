@@ -7,12 +7,14 @@
 //! 1. reading its own metadata from the Triton model config ([`Factory`]),
 //! 2. turning a decoded RGB image into the model's input tensor
 //!    ([`Backend::preprocess`]),
-//! 3. decoding the raw output tensors into detections in original-image pixel
-//!    coordinates ([`Backend::postprocess`]).
+//! 3. decoding the raw output tensors into task results in original-image
+//!    pixel coordinates ([`Backend::postprocess`]).
 //!
-//! A new model family is a new crate under `backends/<name>/` that exports a
-//! `FAMILY` string and a `create` function matching [`Factory`], registered
-//! in `gateway/src/registry.rs`.
+//! Each *task* (the `task` metadata field) has its own backend trait:
+//! [`Backend`] for `detect`, [`ocr::OcrBackend`] for `ocr`. A new model family
+//! is a new crate under `backends/<name>/` that exports a `FAMILY` string and
+//! a `create` function matching its task's factory type, registered in
+//! `gateway/src/registry.rs`.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -20,6 +22,7 @@ use serde_json::Value;
 pub use image;
 use image::RgbImage;
 
+pub mod ocr;
 pub mod util;
 
 /// Errors a backend can report. The gateway maps `InvalidModel` to a startup
@@ -45,9 +48,12 @@ pub struct ModelInfo<'a> {
     pub metadata: &'a Value,
     /// Triton `max_batch_size` (0 = the graph carries an explicit batch dim).
     pub max_batch_size: u64,
+    /// Extra Triton models this one declared in its `companions` metadata
+    /// (e.g. an OCR detector's recognizer), loaded by the gateway in order.
+    pub companions: &'a [ModelInfo<'a>],
 }
 
-/// Constructor every backend crate exports as `pub fn create`.
+/// Constructor every `detect` backend crate exports as `pub fn create`.
 pub type Factory = fn(&ModelInfo) -> Result<Box<dyn Backend>>;
 
 /// One FP32 input tensor ready to send to Triton.
@@ -119,7 +125,7 @@ pub struct Detection {
     pub y2: f64,
 }
 
-/// A model backend. Implementations must be cheap to share across threads;
+/// A `detect` model backend. Implementations must be cheap to share across threads;
 /// `preprocess` runs on a blocking worker thread.
 pub trait Backend: Send + Sync {
     /// Family identifier (matches the `family` metadata field).

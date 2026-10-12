@@ -2,10 +2,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gateway::api::{self, AppState};
 use gateway::config::Config;
 use gateway::error::ApiError;
 use gateway::sources;
+use gateway::state::{self, AppState};
 use gateway::triton::TritonClient;
 use tracing_subscriber::EnvFilter;
 
@@ -35,7 +35,8 @@ fn parse_args() -> PathBuf {
             "--help" | "-h" => {
                 println!(
                     "usage: gateway [--config path/to/config.yaml]\n\n\
-                     Ultralytics-compatible /predict gateway in front of Triton Inference Server.\n\
+                     Inference gateway in front of Triton Inference Server: Ultralytics-compatible\n\
+                     /predict (detection) and Cloud Vision-compatible /v1/images:annotate (OCR).\n\
                      Model-agnostic: the backend is picked from the Triton model metadata."
                 );
                 std::process::exit(0);
@@ -62,13 +63,26 @@ async fn run() -> Result<(), ApiError> {
         cfg.triton.url = url;
     }
     let cfg = Arc::new(cfg);
+    let mut served = Vec::new();
+    if let Some(e) = &cfg.endpoints.detect {
+        served.push(format!(
+            "detect='{}' ({} key(s))",
+            e.triton_model(),
+            e.api_keys.len()
+        ));
+    }
+    if let Some(e) = &cfg.endpoints.ocr {
+        served.push(format!(
+            "ocr='{}' ({} key(s))",
+            e.triton_model(),
+            e.api_keys.len()
+        ));
+    }
     tracing::info!(
-        "loaded {} (model='{}' -> triton '{}' at {}, {} api key(s))",
+        "loaded {} (endpoints: {} -> triton at {})",
         config_path.display(),
-        cfg.default_model,
-        cfg.triton_model(),
-        cfg.triton.url,
-        cfg.api_keys.len()
+        served.join(", "),
+        cfg.triton.url
     );
 
     let triton = Arc::new(TritonClient::new(
@@ -79,12 +93,12 @@ async fn run() -> Result<(), ApiError> {
     let fetch =
         sources::fetch_client(&cfg.limits).map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    // Serve immediately; the model loads in the background so clients get a
+    // Serve immediately; models load in the background so clients get a
     // JSON 503 ("model ... is not ready: <reason>") rather than a dead port.
     let state = Arc::new(AppState::new(cfg.clone(), triton, fetch));
-    api::spawn_model_loader(state.clone());
+    state::spawn_model_loaders(state.clone());
 
-    let app = api::router(state);
+    let app = gateway::endpoints::router(state);
     let listener = tokio::net::TcpListener::bind(&cfg.server.listen)
         .await
         .map_err(|e| ApiError::Internal(format!("cannot bind {}: {e}", cfg.server.listen)))?;

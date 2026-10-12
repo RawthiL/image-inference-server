@@ -2,12 +2,13 @@
 
 Each folder here is one **model family**: everything specific to that model,
 and nothing else. The gateway (`../gateway/`) is model-agnostic. It only talks
-to backends through the `Backend` trait in [`../backend-api`](../backend-api/src/lib.rs).
+to backends through their task's trait in [`../backend-api`](../backend-api/src/lib.rs):
+`Backend` for `detect` models, `ocr::OcrBackend` for `ocr` models.
 
 ```
 backends/<name>/
 ├── Cargo.toml        # crate `backend-<name>`, depends on backend-api
-├── src/lib.rs        # FAMILY + create() + impl Backend (pre/post-processing)
+├── src/lib.rs        # FAMILY + create() + impl Backend / OcrBackend (pre/post-processing)
 ├── export.py         # weights -> ONNX + Triton config.pbtxt (metadata.family = "<name>")
 ├── triton_repo.py    # FAMILY, check(conf, meta), make_fixture(repo, workdir)
 └── README.md         # model contract + LICENSE of the weights
@@ -15,7 +16,7 @@ backends/<name>/
 
 ## The contract
 
-### Rust (`src/lib.rs`)
+### Rust (`src/lib.rs`), `detect` task
 
 ```rust
 pub const FAMILY: &str = "<name>";                         // == metadata "family"
@@ -40,10 +41,38 @@ impl Backend for MyModel {
 - `backend_api::util` has shared helpers: CHW packing, output lookup with
   optional batch dim, sigmoid, clamping, sort-and-cap.
 
+### Rust, `ocr` task
+
+OCR chains two Triton models with CPU work in between, so the backend exposes
+stages and the gateway drives the Triton calls (see `backends/ppocr/`):
+
+```rust
+pub fn create(info: &ModelInfo) -> Result<Box<dyn OcrBackend>>; // recognizer in info.companions
+
+impl OcrBackend for MyOcr {
+    fn family(&self) -> &'static str;
+    fn detector(&self) -> &Stage;               // Triton model + outputs
+    fn recognizer(&self) -> &Stage;
+    fn preprocess_detect(&self, image: &RgbImage) -> Prepared;
+    fn postprocess_detect(&self, outputs: &[OutputTensor], map: &BoxMap, params: &OcrParams)
+        -> Result<Vec<TextRegion>>;            // reading-order quads, original pixels
+    fn preprocess_recognize(&self, image: &RgbImage, regions: &[TextRegion]) -> Vec<RecBatch>;
+    fn postprocess_recognize(&self, outputs: &[OutputTensor], batch: &RecBatch)
+        -> Result<Vec<TextLine>>;              // text + per-glyph spans
+}
+```
+
+The region-only mode (`TEXT_REGION_DETECTION`) stops after
+`postprocess_detect`. Glyph spans let the gateway build word and symbol boxes
+for any API.
+
 ### Metadata (`config.pbtxt` → `parameters.metadata.string_value`)
 
-The exporter embeds a JSON blob. These fields are common to all backends
-(`backend_api::CommonMeta`):
+The exporter embeds a JSON blob. `family` selects the backend and `task`
+(`"detect"` or `"ocr"`) must match the endpoint that serves the model.
+`companions` (optional) lists other Triton models the gateway loads together
+with this one and passes in `ModelInfo::companions`. Detection backends share
+these fields (`backend_api::CommonMeta`):
 
 ```json
 { "family": "<name>", "task": "detect", "names": ["..."], "imgsz": 640,
@@ -74,7 +103,7 @@ The workspace already includes `backends/*`. Then:
 2. `gateway/Cargo.toml`: add `backend-<name> = { workspace = true, optional = true }`,
    a feature `<name> = ["dep:backend-<name>"]`, and add it to `default` if it
    should be built in by default.
-3. `gateway/src/registry.rs`, in `BACKENDS`:
+3. `gateway/src/registry.rs`, in `DETECT_BACKENDS` (or `OCR_BACKENDS`):
    ```rust
    #[cfg(feature = "<name>")]
    (backend_<name>::FAMILY, backend_<name>::create),

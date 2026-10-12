@@ -10,15 +10,76 @@ pub struct Config {
     #[serde(default)]
     pub server: ServerCfg,
     pub triton: TritonCfg,
-    /// Public model served by this deployment (== Triton model name unless
-    /// `triton_model_name` overrides it).
-    pub default_model: String,
-    /// Bearer API keys accepted on every request (flat list).
-    pub api_keys: Vec<String>,
+    /// The APIs (services) this deployment serves. Only enabled endpoints
+    /// are routed, each with its own API keys.
+    pub endpoints: Endpoints,
     #[serde(default)]
     pub limits: Limits,
+}
+
+/// One block per API. A missing block or `enabled: false` means the
+/// endpoint's routes are not mounted.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Endpoints {
+    /// Ultralytics-compatible object detection (`POST /predict`).
+    pub detect: Option<DetectEndpoint>,
+    /// Google Cloud Vision-compatible OCR (`POST /v1/images:annotate`).
+    pub ocr: Option<OcrEndpoint>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DetectEndpoint {
+    #[serde(default = "enabled")]
+    pub enabled: bool,
+    /// Public model name (== Triton model name unless `triton_model_name`).
+    pub model: String,
+    #[serde(default)]
+    pub triton_model_name: Option<String>,
+    /// API keys accepted by this endpoint only.
+    pub api_keys: Vec<String>,
     #[serde(default)]
     pub defaults: Defaults,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OcrEndpoint {
+    #[serde(default = "enabled")]
+    pub enabled: bool,
+    /// Public model name of the text *detector*; its recognizer is listed in
+    /// the detector's `companions` metadata.
+    pub model: String,
+    #[serde(default)]
+    pub triton_model_name: Option<String>,
+    /// API keys accepted by this endpoint only.
+    pub api_keys: Vec<String>,
+    /// Most images accepted in one `images:annotate` call.
+    #[serde(default = "default_max_images")]
+    pub max_images_per_request: usize,
+    #[serde(default)]
+    pub defaults: OcrDefaults,
+}
+
+fn enabled() -> bool {
+    true
+}
+
+fn default_max_images() -> usize {
+    16
+}
+
+impl DetectEndpoint {
+    pub fn triton_model(&self) -> &str {
+        self.triton_model_name.as_deref().unwrap_or(&self.model)
+    }
+}
+
+impl OcrEndpoint {
+    pub fn triton_model(&self) -> &str {
+        self.triton_model_name.as_deref().unwrap_or(&self.model)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -45,9 +106,6 @@ pub struct TritonCfg {
     pub api_key: Option<String>,
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
-    /// Optional explicit Triton model name if it differs from `default_model`.
-    #[serde(default)]
-    pub triton_model_name: Option<String>,
 }
 
 fn default_timeout_ms() -> u64 {
@@ -100,6 +158,27 @@ impl Default for Defaults {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OcrDefaults {
+    /// Minimum text-region score (unset: the model's own default).
+    pub min_region_score: Option<f64>,
+    /// Recognized lines below this confidence are dropped.
+    pub min_text_confidence: f64,
+    /// Most text regions kept per image.
+    pub max_regions: usize,
+}
+
+impl Default for OcrDefaults {
+    fn default() -> Self {
+        Self {
+            min_region_score: None,
+            min_text_confidence: 0.5,
+            max_regions: 1000,
+        }
+    }
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).map_err(|e| {
@@ -107,27 +186,87 @@ impl Config {
         })?;
         let cfg: Config = serde_yaml::from_str(&text)
             .map_err(|e| ApiError::Internal(format!("invalid config {}: {e}", path.display())))?;
-        if cfg.api_keys.is_empty() {
-            return Err(ApiError::Internal(
-                "api_keys must not be empty; refuse to serve unauthenticated".into(),
-            ));
-        }
-        for key in &cfg.api_keys {
-            if key.is_empty() {
-                return Err(ApiError::Internal("api_keys contains an empty key".into()));
-            }
-        }
-        Ok(cfg)
+        cfg.validate()
+            .map_err(|e| ApiError::Internal(format!("invalid config {}: {e}", path.display())))
     }
 
-    pub fn triton_model(&self) -> &str {
-        self.triton
-            .triton_model_name
-            .as_deref()
-            .unwrap_or(&self.default_model)
+    /// Drop disabled endpoints (so the rest of the gateway only sees served
+    /// ones) and check what serde can't.
+    fn validate(mut self) -> std::result::Result<Self, String> {
+        self.endpoints.detect = self.endpoints.detect.filter(|e| e.enabled);
+        self.endpoints.ocr = self.endpoints.ocr.filter(|e| e.enabled);
+        if self.endpoints.detect.is_none() && self.endpoints.ocr.is_none() {
+            return Err("no endpoint enabled; configure `endpoints.detect` and/or \
+                        `endpoints.ocr`"
+                .into());
+        }
+        let keyed = [
+            (
+                "detect",
+                self.endpoints.detect.as_ref().map(|e| &e.api_keys),
+            ),
+            ("ocr", self.endpoints.ocr.as_ref().map(|e| &e.api_keys)),
+        ];
+        for (name, keys) in keyed {
+            let Some(keys) = keys else { continue };
+            if keys.is_empty() {
+                return Err(format!(
+                    "endpoints.{name}.api_keys must not be empty; refuse to serve \
+                     unauthenticated"
+                ));
+            }
+            if keys.iter().any(String::is_empty) {
+                return Err(format!("endpoints.{name}.api_keys contains an empty key"));
+            }
+        }
+        if let Some(ocr) = &self.endpoints.ocr
+            && ocr.max_images_per_request == 0
+        {
+            return Err("endpoints.ocr.max_images_per_request must be at least 1".into());
+        }
+        Ok(self)
     }
 
     pub fn max_upload_bytes(&self) -> usize {
         self.limits.max_upload_mb as usize * 1024 * 1024
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(yaml: &str) -> std::result::Result<Config, String> {
+        let base = "triton: { url: \"http://t\" }\n";
+        serde_yaml::from_str::<Config>(&format!("{base}{yaml}"))
+            .map_err(|e| e.to_string())?
+            .validate()
+    }
+
+    #[test]
+    fn endpoints_are_enabled_independently_with_their_own_keys() {
+        let cfg = parse(
+            "endpoints:\n  detect: { model: d, api_keys: [a], enabled: false }\n  \
+             ocr: { model: o, api_keys: [b] }\n",
+        )
+        .unwrap();
+        assert!(cfg.endpoints.detect.is_none());
+        let ocr = cfg.endpoints.ocr.unwrap();
+        assert_eq!(
+            (ocr.triton_model(), ocr.api_keys.as_slice()),
+            ("o", &["b".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn rejects_unkeyed_empty_or_legacy_configs() {
+        assert!(parse("endpoints: { ocr: { model: o, api_keys: [] } }\n").is_err());
+        assert!(parse("endpoints: { ocr: { model: o, api_keys: [\"\"] } }\n").is_err());
+        assert!(parse("endpoints: { ocr: { model: o } }\n").is_err());
+        assert!(
+            parse("endpoints: { ocr: { model: o, api_keys: [k], enabled: false } }\n").is_err()
+        );
+        assert!(parse("default_model: m\napi_keys: [k]\n").is_err());
+        assert!(parse("").is_err());
     }
 }

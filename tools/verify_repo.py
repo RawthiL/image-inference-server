@@ -94,19 +94,26 @@ def main() -> None:
             meta_str = conf.parameters["metadata"].string_value
             meta = json.loads(meta_str)
             assert meta["family"] in backends, f"unknown family {meta['family']!r} (have {sorted(backends)})"
-            assert meta["task"] == "detect"
-            assert meta["names"], "empty names"
-            b = [1] if conf.max_batch_size == 0 else []  # no-batch repos carry explicit batch
-            expect = [*b, 3, meta["imgsz"], meta["imgsz"]]
-            assert list(conf.input[0].dims) == expect, list(conf.input[0].dims)
+            task = meta.get("task", "detect")
+            assert task in ("detect", "ocr"), f"unknown task {task!r}"
+            if task == "detect":
+                assert meta["names"], "empty names"
+                b = [1] if conf.max_batch_size == 0 else []  # no-batch repos carry explicit batch
+                expect = [*b, 3, meta["imgsz"], meta["imgsz"]]
+                assert list(conf.input[0].dims) == expect, list(conf.input[0].dims)
             assert conf.input[0].name == meta["input"], (conf.input[0].name, meta["input"])
+            for companion in meta.get("companions", []):
+                assert (args.repo / companion / "config.pbtxt").exists(), \
+                    f"companion model {companion!r} is not in the repository"
             assert [o.name for o in conf.output] == meta["outputs"], [o.name for o in conf.output]
             backends[meta["family"]].check(conf, meta)
             onnx_file = cfg_path.parent / "1" / "model.onnx"
             if onnx_file.exists():
                 common.check_onnx_matches_batching(onnx_file, conf.max_batch_size)
-            print(f"OK   {name}: family={meta['family']} imgsz={meta['imgsz']} "
-                  f"classes={len(meta['names'])} batch={conf.max_batch_size}")
+            detail = (f"imgsz={meta['imgsz']} classes={len(meta['names'])}" if task == "detect"
+                      else f"stage={meta.get('stage')}")
+            print(f"OK   {name}: family={meta['family']} task={task} {detail} "
+                  f"batch={conf.max_batch_size}")
         except Exception as e:
             failures += 1
             print(f"FAIL {name}: {e!r}")

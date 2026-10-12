@@ -18,10 +18,12 @@ cargo test --workspace
 echo "==> Rust: each backend builds on its own (feature isolation)"
 cargo build -q -p gateway --no-default-features --features yolo
 cargo build -q -p gateway --no-default-features --features rfdetr
+cargo build -q -p gateway --no-default-features --features ppocr
 
 echo "==> Rust release binary + Python OpenAPI contract test (real ONNX, all fixtures)"
 cargo build --release -p gateway
 uv run --extra test python tests/test_predict_integration.py
+uv run --extra test python tests/test_vision_integration.py
 uv run --extra test python tests/test_hf_model_matrix.py   # skips if rfdetr-small not exported
 
 echo "All checks passed."

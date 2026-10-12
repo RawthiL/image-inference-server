@@ -2,7 +2,7 @@
 # Copy to config.yaml and edit. All values below are the defaults unless noted.
 
 server:
-  listen: "0.0.0.0:8080"        # gateway binds here; clients POST /predict
+  listen: "0.0.0.0:8080"        # gateway binds here
 
 triton:
   url: "http://triton:8000"     # Triton HTTP endpoint (env TRITON_URL overrides;
@@ -11,24 +11,48 @@ triton:
   # Optional Bearer key if Triton sits behind an auth proxy. Leave unset when
   # Triton is network-internal.
   # api_key: "shared-secret"
-  # Optional: Triton model name if it differs from default_model.
-  # triton_model_name: "yolo26n"
 
-# The single public model this deployment serves (a Triton model name). Any
-# model exported by a backends/<family>/export.py works: the gateway reads the
-# model's metadata from Triton at startup and selects the matching backend,
-# so the /predict request and response are identical regardless of model.
-# Check the model's license before serving it commercially (see README).
-default_model: "rfdetr-base"    # e.g. yolo26n (AGPL-3.0, bring your license)
+# The APIs (services) this deployment serves. Only endpoints listed here (and
+# not `enabled: false`) are mounted; the others answer 404. Each endpoint has
+# its own API keys: a key only opens the endpoints that list it (repeat a key,
+# or use a YAML anchor, to share it). Each one serves a
+# Triton model exported by a backends/<family>/export.py: the gateway reads
+# the model's metadata at startup, checks its task matches the endpoint, and
+# selects the matching backend, so requests and responses are identical
+# regardless of model. Check the model's license before serving it
+# commercially (see README).
+endpoints:
+  # Object detection, Ultralytics-compatible: POST /predict
+  detect:
+    model: "rfdetr-base"        # e.g. yolo26n (AGPL-3.0, bring your license)
+    # triton_model_name: "rfdetr-base"   # if the Triton name differs
+    # `Authorization: Bearer <key>`, constant-time compared.
+    api_keys: &detect_keys
+      - "change-me-detect-client-a"
+    defaults:
+      conf: 0.25                # applied when request omits `conf`
+      iou: 0.7                  # accepted for API parity (NMS-free => unused)
+      # decimals: 3             # coordinate precision for pixel-space boxes
 
-# Flat list of accepted Bearer API keys (one per client). A request is
-# authorized if `Authorization: Bearer <key>` constant-time matches any entry.
-api_keys:
-  - "change-me-client-a"
-  # - "change-me-client-b"
+  # OCR, Google Cloud Vision-compatible: POST /v1/images:annotate
+  # (TEXT_DETECTION, DOCUMENT_TEXT_DETECTION, and the region-only extension
+  # TEXT_REGION_DETECTION). `model` is the text detector; its recognizer is
+  # found through the detector's metadata (backends/ppocr/export.py).
+  ocr:
+    enabled: false
+    model: "ppocr-det"          # e.g. PP-OCRv6 medium, see backends/ppocr/README.md
+    # `?key=<key>`, `x-goog-api-key: <key>` or `Authorization: Bearer <key>`.
+    api_keys:
+      - "change-me-ocr-client-a"
+      # To give the detect clients OCR access too: `api_keys: *detect_keys`
+    max_images_per_request: 16
+    defaults:
+      # min_region_score: 0.6   # detector score floor (unset: model default)
+      min_text_confidence: 0.5  # drop recognized lines below this
+      max_regions: 1000         # text regions kept per image
 
-limits:
-  max_upload_mb: 20
+limits:                         # shared by all endpoints
+  max_upload_mb: 20             # per image (OCR: base64 JSON body capped to match)
   # Accept `source` as an http(s) image URL (the gateway downloads it).
   # Off by default: only images in the payload (`file` or base64 `source`).
   # Enabling it lets callers make this node fetch arbitrary public URLs.
@@ -36,8 +60,3 @@ limits:
   url_timeout_ms: 10000         # when source is an http(s) URL
   allow_private_urls: false     # SSRF guard (DNS + redirects); true = dev only
   max_image_pixels: 40000000    # width*height cap, checked before decoding
-
-defaults:
-  conf: 0.25                    # applied when request omits `conf`
-  iou: 0.7                      # accepted for API parity (NMS-free => unused)
-  # decimals: 3                 # coordinate precision for pixel-space boxes

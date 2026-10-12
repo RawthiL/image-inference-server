@@ -7,12 +7,17 @@ The metadata dict written into `config.pbtxt` is the contract between a
 backend's exporter and the same backend's Rust crate. Fields every backend
 writes (parsed by `backend-api` `CommonMeta`):
 
-family      : str, selects the gateway backend (e.g. "yolo", "rfdetr")
-task        : "detect"
-names       : list[str], indexed by class id
-imgsz       : int, native square input resolution served by Triton
+family      : str, selects the gateway backend (e.g. "yolo", "rfdetr", "ppocr")
+task        : "detect" | "ocr", selects the gateway endpoint that may serve it
 input       : str, ONNX input tensor name
 outputs     : list[str], ONNX output tensor names (in request order)
+companions  : optional list[str], other Triton models the gateway loads
+              together with this one (e.g. an OCR detector's recognizer)
+
+`detect` models also write:
+
+names       : list[str], indexed by class id
+imgsz       : int, native square input resolution served by Triton
 
 Backends add their own fields (see backends/<family>/README.md).
 """
@@ -202,10 +207,11 @@ def check_onnx_matches_batching(onnx_path: Path, max_batch_size: int) -> None:
 
 
 def batched_constant_onnx(path: Path, input_name: str, imgsz: int,
-                          outputs: dict[str, Any]) -> None:
+                          outputs: dict[str, Any], input_shape: list | None = None) -> None:
     """Write a fixture ONNX with a DYNAMIC batch input `[batch, 3, imgsz, imgsz]`
-    whose outputs are the given constant arrays (each shaped `[1, ...]`)
-    broadcast to `[batch, ...]`. Loadable by real Triton with max_batch_size > 0.
+    (or `input_shape`, whose first dim must be symbolic) whose outputs are the
+    given constant arrays (each shaped `[1, ...]`) broadcast to `[batch, ...]`.
+    Loadable by real Triton with max_batch_size > 0.
     """
     import numpy as np
     import onnx
@@ -230,7 +236,8 @@ def batched_constant_onnx(path: Path, input_name: str, imgsz: int,
         outs.append(helper.make_tensor_value_info(name, TensorProto.FLOAT, ["batch", *arr.shape[1:]]))
     graph = helper.make_graph(
         nodes, "fixture",
-        [helper.make_tensor_value_info(input_name, TensorProto.FLOAT, ["batch", 3, imgsz, imgsz])],
+        [helper.make_tensor_value_info(input_name, TensorProto.FLOAT,
+                                       input_shape or ["batch", 3, imgsz, imgsz])],
         outs, inits,
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])

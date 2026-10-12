@@ -84,10 +84,9 @@ def main() -> None:
     cfg.write_text(f"""
 server: {{ listen: "127.0.0.1:{gw_port}" }}
 triton: {{ url: "http://127.0.0.1:{mock_port}", timeout_ms: 30000 }}
-default_model: "{MODEL}"
-api_keys: ["{KEY}"]
+endpoints:
+  detect: {{ model: "{MODEL}", api_keys: ["{KEY}"], defaults: {{ conf: 0.25, iou: 0.7 }} }}
 limits: {{ max_upload_mb: 20, allow_private_urls: true }}
-defaults: {{ conf: 0.25, iou: 0.7 }}
 """)
 
     mock = subprocess.Popen([sys.executable, str(HERE / "mock_triton.py"),

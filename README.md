@@ -1,7 +1,12 @@
 # image-inference-server
 
-An **object-detection backend for [Pocket Network](https://pocket.network)**.
-It exposes an **Ultralytics-compatible `/predict` API** and serves any supported detection model through [NVIDIA Triton Inference Server](https://github.com/triton-inference-server/server).
+An **image-inference backend for [Pocket Network](https://pocket.network)**.
+It serves any supported model through [NVIDIA Triton Inference Server](https://github.com/triton-inference-server/server), behind existing public APIs:
+
+- **Object detection**: an **Ultralytics-compatible `/predict` API**.
+- **OCR**: a **Google Cloud Vision-compatible `/v1/images:annotate` API**.
+
+The operator chooses which endpoints a deployment serves in `config.yaml`.
 
 The service is **model-agnostic**. Clients always see the same request and response format, whichever model the operator chooses to run. Each model
 family is a self-contained plugin under [`backends/`](backends/). Adding amodel means adding a folder.
@@ -38,12 +43,23 @@ The code is split into three layers:
 | Layer | Path | Responsibility | Knows about models? |
 |-------|------|----------------|---------------------|
 | **Interface** | [`gateway/`](gateway/) | HTTP API, auth, input handling, Triton client, JSON response | **No** |
-| **Contract** | [`backend-api/`](backend-api/) | The `Backend` trait and shared types/helpers | No |
+| **Contract** | [`backend-api/`](backend-api/) | One backend trait per task (`Backend` for detect, `OcrBackend` for OCR), shared types/helpers | No |
 | **Backends** | [`backends/<family>/`](backends/) | Pre-processing, output decoding, ONNX exporter, fixtures, license notes | Only its own family |
 
-At startup the gateway reads the served model's `config.pbtxt` from Triton.
-The `family` field in its embedded metadata (written by that backend's
-exporter) selects the backend. Nothing in `gateway/` branches on model type.
+At startup the gateway reads each enabled endpoint's model `config.pbtxt`
+from Triton. The `task` field in its embedded metadata must match the
+endpoint (`detect` or `ocr`), and the `family` field (written by that
+backend's exporter) selects the backend. A model can list `companions`
+(e.g. an OCR detector names its recognizer), which are loaded with it.
+Nothing in `gateway/` branches on model type.
+
+Each endpoint is one *task* with its own wire contract, copied from an
+existing public API so existing clients work unchanged:
+
+| Endpoint | Task | Compatible with | Code |
+|----------|------|-----------------|------|
+| `POST /predict` | `detect` | Ultralytics Platform `predict` | `gateway/src/endpoints/detect.rs` |
+| `POST /v1/images:annotate` | `ocr` | Google Cloud Vision `images:annotate` | `gateway/src/endpoints/vision.rs` |
 
 ## Supported backends
 
@@ -52,6 +68,7 @@ exporter) selects the backend. Nothing in `gateway/` branches on model type.
 | YOLO (end-to-end, NMS-free) | [`backends/yolo`](backends/yolo/) | Ultralytics YOLO11 / YOLO26 detect (`end2end` head) | MIT | **AGPL-3.0, Enterprise License needed for commercial use** |
 | RF-DETR | [`backends/rfdetr`](backends/rfdetr/) | RF-DETR Nano / Small / Base / Medium / Large | MIT | Apache-2.0 ✅ |
 | RF-DETR (large tiers) | [`backends/rfdetr`](backends/rfdetr/) | RF-DETR XLarge / 2XLarge | MIT | **Roboflow Platform Model License, not open source** |
+| PP-OCR (OCR) | [`backends/ppocr`](backends/ppocr/) | PaddleOCR PP-OCR det + rec (v3 to v6; v6 medium recommended) | MIT | Apache-2.0 ✅ |
 
 Each backend is a Cargo feature, so you can build a gateway that contains
 only the families you are licensed to run:
@@ -101,10 +118,11 @@ project is not affiliated with or endorsed by Ultralytics or Roboflow.
 
 | Path | What |
 |------|------|
-| `gateway/` | Rust (axum) HTTP interface: `/predict`, auth, sources, Triton client |
+| `gateway/` | Rust (axum) HTTP interface: endpoints, auth, sources, Triton client |
 | `backend-api/` | Rust crate defining the `Backend` trait every model implements |
 | `backends/yolo/` | YOLO backend: Rust pre/post-processing, `export.py`, fixtures, license notes |
 | `backends/rfdetr/` | RF-DETR backend: same structure |
+| `backends/ppocr/` | PP-OCR (OCR) backend: same structure, two Triton models (detector + recognizer) |
 | `backends/README.md` | **How to add a new backend** |
 | `tools/` | Backend-agnostic Python tooling: `config.pbtxt` writer, fixture generator, Triton schema validator |
 | `triton/model_repository/` | Triton model repository (generated) |
@@ -141,6 +159,11 @@ uv run python backends/rfdetr/export.py \
 uv sync --extra yolo                                           
 # -> triton/model_repository/yolo26n
 uv run python backends/yolo/export.py yolo26n                  
+
+# OCR: a PP-OCR detector + recognizer ONNX pair (see backends/ppocr/README.md)
+# -> triton/model_repository/ppocr-det + ppocr-rec
+uv run --extra onnx python backends/ppocr/export.py \
+    --det det.onnx --rec rec.onnx --dict ppocr_keys_v1.txt --name ppocr
 ```
 
 Each exporter writes `triton/model_repository/<name>/{config.pbtxt,1/model.onnx}`.
@@ -149,7 +172,7 @@ Run `tools/verify_repo.py` after every export.
 ### 2. Run Triton + gateway
 
 ```bash
-cp config.example.yaml config.yaml     # set default_model + api_keys
+cp config.example.yaml config.yaml     # set endpoints and their api_keys
 cd docker && docker compose up --build  # gateway on :8080, Triton stays internal
 # only compile the backends you serve:
 GATEWAY_FEATURES=rfdetr docker compose up --build
@@ -182,13 +205,39 @@ r = requests.post("https://your-endpoint/predict",
 print(r.json())   # Ultralytics PredictResponse JSON
 ```
 
+OCR, with the `ocr` endpoint enabled. Cloud Vision clients work unchanged:
+
+```bash
+curl -s "http://localhost:8080/v1/images:annotate?key=change-me-client-a" \
+  -H "Content-Type: application/json" \
+  -d '{"requests": [{"image": {"content": "'"$(base64 < page.png | tr -d '\n')"'"},
+                     "features": [{"type": "TEXT_DETECTION"}]}]}'
+```
+
+```python
+from google.api_core.client_options import ClientOptions
+from google.cloud import vision
+
+client = vision.ImageAnnotatorClient(
+    transport="rest",   # the gateway speaks REST, not gRPC
+    client_options=ClientOptions(api_endpoint="https://your-endpoint",
+                                 api_key=api_key))
+r = client.text_detection(image=vision.Image(content=open("page.png", "rb").read()))
+print(r.full_text_annotation.text)
+```
+
 ## API
 
 | Endpoint | Description |
 |----------|-------------|
-| `POST /predict` | Detection on one image |
+| `POST /predict` | Detection on one image (`endpoints.detect`) |
 | `POST /api/deployments/{owner}/{deployment}/predict` | Same, with the Ultralytics Platform path shape |
-| `GET /health` | `200` when Triton serves the model, `503` otherwise (no auth) |
+| `POST /v1/images:annotate` | OCR, Cloud Vision-compatible (`endpoints.ocr`) |
+| `GET /health` | `200` when Triton serves every enabled endpoint's models, `503` otherwise (no auth). Per-endpoint detail under `endpoints` |
+
+Endpoints that are not enabled in the config are not mounted (`404`).
+
+### Detection: `POST /predict`
 
 The request body is `multipart/form-data` or `application/x-www-form-urlencoded`:
 
@@ -205,7 +254,34 @@ The request body is `multipart/form-data` or `application/x-www-form-urlencoded`
 The response is the Ultralytics `PredictResponse`: `images[].results[]` with
 `name`, `class`, `confidence` and `box {x1,y1,x2,y2}` in original-image
 pixels, plus `speed` and `metadata`. Every error is returned as
-`{"error": "..."}` with a fitting HTTP status. Only object detection is served.
+`{"error": "..."}` with a fitting HTTP status.
+
+### OCR: `POST /v1/images:annotate`
+
+The request and response follow Google Cloud Vision
+[`images:annotate`](https://cloud.google.com/vision/docs/reference/rest/v1/images/annotate):
+`{"requests": [{"image": {...}, "features": [{"type": ...}]}]}`, up to
+`endpoints.ocr.max_images_per_request` images per call (default 16).
+
+| Feature `type` | Result |
+|----------------|--------|
+| `TEXT_DETECTION`, `DOCUMENT_TEXT_DETECTION` | Full OCR: `textAnnotations` (full text first, then one entry per word) and `fullTextAnnotation` (pages → blocks → paragraphs → words → symbols, one block per text line, with `detectedBreak`s) |
+| `TEXT_REGION_DETECTION` | **Extension, not in Cloud Vision.** Text regions only, without recognition (only the detector runs): `textRegionAnnotations: [{boundingPoly, score}]` |
+
+Notes:
+
+- Images: `image.content` (base64), or `image.source.imageUri` (http(s), only
+  with `limits.allow_url_sources`). `gcsImageUri` is not supported.
+- Auth: `?key=<api key>`, `x-goog-api-key: <api key>`, or `Authorization: Bearer <api key>`.
+- Feature types are accepted as names or as their enum numbers (Google REST
+  clients send numbers). `imageContext` (e.g. `languageHints`) is ignored:
+  the served model defines the languages. No `locale` is returned.
+- Polygons are in original-image pixels, in reading order (vertex 0 is the
+  top-left of the text as read), as in Cloud Vision.
+- Errors use the Google envelope `{"error": {"code", "message", "status"}}`.
+  A failure that concerns one image (bad base64, unsupported feature, Triton
+  error) goes in `responses[i].error` with HTTP 200, as Cloud Vision does.
+  An image without text yields `{}`.
 
 ### Resolution and batching
 
@@ -216,8 +292,9 @@ batcher (configured by the exporter) groups concurrent requests on the GPU.
 
 ### Security and limits
 
-- Bearer API keys are compared in constant time. The gateway refuses to start
-  with an empty key list.
+- API keys are per endpoint (`endpoints.<name>.api_keys`): a key opens only
+  the endpoints that list it. Keys are compared in constant time, and the
+  gateway refuses to start if an enabled endpoint has no keys.
 - **Image URLs are off by default.** Only images in the request payload are
   accepted (`file`, or base64 in `source`); an `http(s)` URL in `source`
   returns `400`. Fetching URLs would let any caller make the node download
@@ -241,23 +318,35 @@ batcher (configured by the exporter) groups concurrent requests on the GPU.
 
 See [`config.example.yaml`](config.example.yaml). Key fields:
 
-- `default_model`: the Triton model this deployment serves. Swap between any
-  exported models freely; the backend is selected automatically.
-- `api_keys`: accepted `Bearer` keys.
+- `endpoints.<name>`: which APIs (services) this deployment serves (`detect`,
+  `ocr`) and the Triton model behind each. A missing block or
+  `enabled: false` leaves the endpoint unmounted. Swap between any exported
+  models of the right task freely; the backend is selected automatically.
+- `endpoints.<name>.api_keys`: the keys accepted by that endpoint only, so
+  each service can have its own clients. List a key under several endpoints
+  (or use a YAML anchor) to share it. The gateway refuses to start if an
+  enabled endpoint has no keys.
 - `triton.url` / `triton.api_key` / `triton.timeout_ms`: Triton endpoint. The `TRITON_URL` env var overrides `triton.url`; `docker/docker-compose.yaml` sets it to `http://triton:8000`, so a dev `config.yaml` pointing at localhost still works in containers.
 - `limits.*`: upload cap, pixel cap, URL sources (`allow_url_sources`, off by default), URL fetch timeout, SSRF guard.
-- `defaults.*`: `conf` / `iou` / `decimals` used when a request omits them.
+- `endpoints.detect.defaults.*`: `conf` / `iou` / `decimals` used when a request omits them.
+- `endpoints.ocr.defaults.*`: `min_region_score` (detector floor; unset uses the model's), `min_text_confidence`, `max_regions`.
 
 ## Adding a model backend
 
 1. Create `backends/<name>/` with a Rust crate exporting `FAMILY` and
-   `create()`, implementing `backend_api::Backend`. The trait has two jobs:
-   `preprocess` (image to tensor) and `postprocess` (tensors to detections).
+   `create()`, implementing its task's trait: `backend_api::Backend` for
+   detection (`preprocess`: image to tensor, `postprocess`: tensors to
+   detections) or `backend_api::ocr::OcrBackend` for OCR (detect and
+   recognize stages; the gateway drives the Triton calls).
 2. Add `export.py` (weights to ONNX plus `config.pbtxt` with
    `"family": "<name>"`), `triton_repo.py` (fixture and config check) and a
    `README.md` **stating the model's license**.
 3. Register it: one workspace dependency, one Cargo feature, and one line in
-   `gateway/src/registry.rs`.
+   its task's table in `gateway/src/registry.rs`.
+
+A new *task* (a new API) is a new trait in `backend-api`, a registry table,
+a config block in `Endpoints`, and an `endpoints/<api>.rs` module that
+implements the public API it is compatible with.
 
 The step-by-step guide is in [`backends/README.md`](backends/README.md).
 `gateway/` does not change beyond the registry line.
@@ -278,6 +367,8 @@ cargo build -p gateway --no-default-features --features rfdetr   # backend isola
 # vendored PredictResponse schema for every fixture backend
 cargo build --release -p gateway
 uv run --extra test python tests/test_predict_integration.py
+# OCR: Cloud Vision images:annotate contract (fixture + real PP-OCR if exported)
+uv run --extra test python tests/test_vision_integration.py
 
 # Triton config schema validation (real model_config.proto)
 uv run --with grpcio-tools --with protobuf --with onnx python tools/verify_repo.py

@@ -191,10 +191,9 @@ def main():
             cfg.write_text(f"""
 server: {{ listen: "127.0.0.1:{gw_port}" }}
 triton: {{ url: "http://127.0.0.1:{mock_port}", timeout_ms: 10000 }}
-default_model: "{model}"
+endpoints:
+  detect: {{ model: "{model}", api_keys: ["{API_KEY}"], defaults: {{ conf: 0.25, iou: 0.7 }} }}
 limits: {{ max_upload_mb: 20, allow_private_urls: true }}
-defaults: {{ conf: 0.25, iou: 0.7 }}
-api_keys: ["{API_KEY}"]
 """)
             gw = subprocess.Popen(
                 [str(GATEWAY_BIN), "--config", str(cfg)],

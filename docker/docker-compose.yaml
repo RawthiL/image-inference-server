@@ -3,10 +3,11 @@
 #   (generate models first, from the repo root:
 #      uv run --extra onnx python tools/make_fixtures.py          # smoke fixtures
 #    or with real weights: backends/<family>/export.py)
-#   cp config.example.yaml config.yaml   # then edit keys/default_model
+#   cp config.example.yaml config.yaml   # then edit keys/endpoints
 #   cd docker && docker compose up --build
 #
-# Clients then hit  http://localhost:8080/predict  (OpenAPI-compatible).
+# Clients then hit  http://localhost:8080/predict  (Ultralytics-compatible)
+# and/or            http://localhost:8080/v1/images:annotate  (Cloud Vision OCR).
 # Triton's own ports stay internal (gateway network only) — the gateway is the
 # single authenticated entrypoint.
 
@@ -40,7 +41,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.gateway
       args:
-        FEATURES: "${GATEWAY_FEATURES:-yolo rfdetr}"   # backends compiled in
+        FEATURES: "${GATEWAY_FEATURES:-yolo rfdetr ppocr}"   # backends compiled in
     depends_on:
       triton:
         condition: service_healthy

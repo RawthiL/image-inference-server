@@ -1,7 +1,8 @@
 //! End-to-end contract tests: real gateway router + protocol-accurate mock
 //! Triton (binary tensor extension per docs/protocol/extension_binary_data.md).
 //! Proves the gateway emits an identical Ultralytics `PredictResponse` shape
-//! for both YOLO (end-to-end) and RF-DETR backends.
+//! for both YOLO (end-to-end) and RF-DETR backends, and the Cloud Vision
+//! `images:annotate` shape for the PP-OCR backend.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -17,6 +18,8 @@ use serde_json::{Value, json};
 
 struct Seen {
     inputs: Vec<Value>,
+    /// Model name of every inference request, in order.
+    models: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -53,6 +56,61 @@ fn rfdetr_config() -> Value {
         "name": "rfdetr-base", "backend": "onnxruntime", "max_batch_size": 8,
         "parameters": { "metadata": { "string_value": meta.to_string() } }
     })
+}
+
+const OCR_CHARSET: [&str; 6] = ["H", "I", " ", "Y", "O", "U"];
+
+fn ppocr_det_config() -> Value {
+    let meta = json!({
+        "family": "ppocr", "task": "ocr", "stage": "det", "input": "x",
+        "outputs": ["sigmoid_0.tmp_0"], "companions": ["ppocr-rec"]
+    });
+    json!({
+        "name": "ppocr-det", "backend": "onnxruntime", "max_batch_size": 1,
+        "parameters": { "metadata": { "string_value": meta.to_string() } }
+    })
+}
+
+fn ppocr_rec_config() -> Value {
+    let meta = json!({
+        "family": "ppocr", "task": "ocr", "stage": "rec", "input": "x",
+        "outputs": ["softmax_0.tmp_0"], "imgh": 48, "imgw": 320, "charset": OCR_CHARSET
+    });
+    json!({
+        "name": "ppocr-rec", "backend": "onnxruntime", "max_batch_size": 8,
+        "parameters": { "metadata": { "string_value": meta.to_string() } }
+    })
+}
+
+/// Text "probability" map: 0.9 where the input's first channel is bright.
+fn ppocr_det_tensor(input: &[f32], shape: &[u64]) -> (Vec<f32>, Vec<u64>) {
+    let (h, w) = (shape[2], shape[3]);
+    let plane = (h * w) as usize;
+    let map = input[..plane]
+        .iter()
+        .map(|&v| if v > 0.0 { 0.9 } else { 0.02 })
+        .collect();
+    (map, vec![1, 1, h, w])
+}
+
+/// Every row decodes to "HI YOU": one char every 3 steps, blanks between.
+fn ppocr_rec_tensor(shape: &[u64]) -> (Vec<f32>, Vec<u64>) {
+    let (n, t, c) = (
+        shape[0] as usize,
+        (shape[3] / 8) as usize,
+        OCR_CHARSET.len() + 1,
+    );
+    let mut data = vec![0f32; n * t * c];
+    for row in 0..n {
+        for step in 0..t {
+            let k = match step {
+                s if s % 3 == 1 && s / 3 < 6 => s / 3 + 1,
+                _ => 0,
+            };
+            data[(row * t + step) * c + k] = 0.95;
+        }
+    }
+    (data, vec![n as u64, t as u64, c as u64])
 }
 
 /// output0 (300,6): two valid rows, rest padding (cls -1, conf 0).
@@ -95,6 +153,8 @@ async fn mock_config(
     let _ = &m;
     Json(match model.as_str() {
         "yolo26n" => yolo_config(),
+        "ppocr-det" => ppocr_det_config(),
+        "ppocr-rec" => ppocr_rec_config(),
         _ => rfdetr_config(),
     })
 }
@@ -152,7 +212,21 @@ async fn mock_infer(
             })),
         ));
     }
-    m.seen.lock().unwrap().inputs.push(input.clone());
+    {
+        let mut seen = m.seen.lock().unwrap();
+        seen.inputs.push(input.clone());
+        seen.models.push(model.clone());
+    }
+    let input_shape: Vec<u64> = input["shape"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_u64).collect())
+        .unwrap_or_default();
+    let input_data: Vec<f32> = body[hcl..]
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
+        .collect();
 
     let want_outputs: Vec<String> = header
         .get("outputs")
@@ -172,6 +246,14 @@ async fn mock_infer(
             yolo_fixture_tensor(),
             vec![1, 300, 6],
         )],
+        "ppocr-det" => {
+            let (d, shape) = ppocr_det_tensor(&input_data, &input_shape);
+            vec![("sigmoid_0.tmp_0".to_string(), d, shape)]
+        }
+        "ppocr-rec" => {
+            let (d, shape) = ppocr_rec_tensor(&input_shape);
+            vec![("softmax_0.tmp_0".to_string(), d, shape)]
+        }
         _ => {
             let (d, l) = rfdetr_fixture_tensors();
             vec![
@@ -225,7 +307,10 @@ async fn spawn_mock() -> (SocketAddr, Mock) {
 
 fn spawn_mock_on(listener: tokio::net::TcpListener) -> (SocketAddr, Mock) {
     let m = Mock {
-        seen: Arc::new(Mutex::new(Seen { inputs: vec![] })),
+        seen: Arc::new(Mutex::new(Seen {
+            inputs: vec![],
+            models: vec![],
+        })),
     };
     let app = Router::new()
         .route("/v2", get(mock_metadata))
@@ -267,7 +352,7 @@ async fn start_gateway(
     triton_addr: SocketAddr,
     model: &str,
     allow_private: bool,
-) -> (SocketAddr, Arc<gateway::api::AppState>) {
+) -> (SocketAddr, Arc<gateway::state::AppState>) {
     start_gateway_cfg(triton_addr, model, allow_private, true).await
 }
 
@@ -276,21 +361,23 @@ async fn start_gateway_cfg(
     model: &str,
     allow_private: bool,
     allow_url: bool,
-) -> (SocketAddr, Arc<gateway::api::AppState>) {
+) -> (SocketAddr, Arc<gateway::state::AppState>) {
     let cfg_text = format!(
         r#"
 server: {{ listen: "127.0.0.1:0" }}
 triton:
   url: "http://{triton_addr}"
   timeout_ms: 5000
-default_model: "{model}"
-api_keys: ["test-key-1", "test-key-2"]
+endpoints:
+  detect:
+    model: "{model}"
+    api_keys: ["test-key-1", "test-key-2"]
+    defaults: {{ conf: 0.25, iou: 0.7 }}
 limits:
   max_upload_mb: 4
   url_timeout_ms: 3000
   allow_url_sources: {allow_url}
   allow_private_urls: {allow_private}
-defaults: {{ conf: 0.25, iou: 0.7 }}
 "#
     );
     let n = CFG_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -307,26 +394,69 @@ defaults: {{ conf: 0.25, iou: 0.7 }}
     ));
     let fetch = gateway::sources::fetch_client(&cfg.limits).unwrap();
     // Same startup path as the binary: serve now, load the model in background.
-    let state = Arc::new(gateway::api::AppState::new(cfg.clone(), triton, fetch));
-    gateway::api::spawn_model_loader(state.clone());
-    let app = gateway::api::router(state.clone());
+    let state = Arc::new(gateway::state::AppState::new(cfg.clone(), triton, fetch));
+    gateway::state::spawn_model_loaders(state.clone());
+    let app = gateway::endpoints::router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (addr, state)
 }
 
-async fn wait_ready(state: &gateway::api::AppState) {
+/// Start a gateway serving the given `endpoints:` YAML block (indented by
+/// two spaces) and wait for its models.
+async fn spawn_gateway_endpoints(
+    triton_addr: SocketAddr,
+    endpoints: &str,
+) -> (SocketAddr, Arc<gateway::state::AppState>) {
+    let (addr, state) = start_gateway_endpoints(triton_addr, endpoints).await;
+    wait_ready(&state).await;
+    (addr, state)
+}
+
+async fn start_gateway_endpoints(
+    triton_addr: SocketAddr,
+    endpoints: &str,
+) -> (SocketAddr, Arc<gateway::state::AppState>) {
+    let cfg_text = format!(
+        r#"
+server: {{ listen: "127.0.0.1:0" }}
+triton: {{ url: "http://{triton_addr}", timeout_ms: 5000 }}
+limits: {{ max_upload_mb: 4, allow_url_sources: true, allow_private_urls: true }}
+endpoints:
+{endpoints}
+"#
+    );
+    let n = CFG_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let path = std::env::temp_dir().join(format!(
+        "gateway-test-config-{}-endpoints-{n}.yaml",
+        std::process::id()
+    ));
+    std::fs::write(&path, &cfg_text).unwrap();
+    let cfg = Arc::new(gateway::config::Config::load(&path).unwrap());
+    let triton = Arc::new(gateway::triton::TritonClient::new(
+        &cfg.triton.url,
+        None,
+        std::time::Duration::from_millis(cfg.triton.timeout_ms),
+    ));
+    let fetch = gateway::sources::fetch_client(&cfg.limits).unwrap();
+    let state = Arc::new(gateway::state::AppState::new(cfg.clone(), triton, fetch));
+    gateway::state::spawn_model_loaders(state.clone());
+    let app = gateway::endpoints::router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (addr, state)
+}
+
+async fn wait_ready(state: &gateway::state::AppState) {
     for _ in 0..200 {
-        if state.ready.get().is_some() {
+        if state.is_ready() {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-    panic!(
-        "model never became ready: {:?}",
-        state.load_error.lock().unwrap()
-    );
+    panic!("model never became ready: {:?}", state.load_errors());
 }
 
 fn make_test_jpeg() -> Vec<u8> {
@@ -799,7 +929,7 @@ async fn triton_down_returns_json_503_then_recovers() {
 
     // The gateway is up and explains why it cannot serve yet.
     for _ in 0..100 {
-        if state.load_error.lock().unwrap().is_some() {
+        if !state.load_errors().is_empty() {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -817,7 +947,10 @@ async fn triton_down_returns_json_503_then_recovers() {
     let h: Value = resp.json().await.unwrap();
     assert_eq!(h["status"], "loading");
     assert!(
-        h["error"].as_str().unwrap().contains("triton unreachable"),
+        h["endpoints"]["detect"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("triton unreachable"),
         "{h}"
     );
 
@@ -829,7 +962,7 @@ async fn triton_down_returns_json_503_then_recovers() {
     let listener = tokio::net::TcpListener::bind(triton_addr).await.unwrap();
     let _mock = spawn_mock_on(listener);
     for _ in 0..600 {
-        if state.ready.get().is_some() {
+        if state.is_ready() {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -903,4 +1036,306 @@ async fn url_sources_disabled_by_config() {
 #[test]
 fn url_sources_are_off_by_default() {
     assert!(!gateway::config::Limits::default().allow_url_sources);
+}
+
+// --- OCR (Cloud Vision images:annotate) ----------------------------------------
+
+const OCR_ONLY: &str = "  ocr: { model: ppocr-det, api_keys: [test-key-1, test-key-2] }";
+
+/// 320x160 black PNG with one white "text line" at x 40..=199, y 60..=89.
+fn make_text_png() -> Vec<u8> {
+    use image::{Rgb, RgbImage};
+    let img = RgbImage::from_fn(320, 160, |x, y| {
+        if (40..=199).contains(&x) && (60..=89).contains(&y) {
+            Rgb([255, 255, 255])
+        } else {
+            Rgb([0, 0, 0])
+        }
+    });
+    let mut buf = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+    buf.into_inner()
+}
+
+fn annotate_body(image: &[u8], features: Value) -> Value {
+    use base64::Engine;
+    let content = base64::engine::general_purpose::STANDARD.encode(image);
+    json!({ "requests": [{ "image": { "content": content }, "features": features }] })
+}
+
+async fn post_annotate(addr: SocketAddr, query: &str, body: &Value) -> (StatusCode, Value) {
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/images:annotate{query}"))
+        .json(body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, resp.json::<Value>().await.unwrap_or(Value::Null))
+}
+
+fn vertices(poly: &Value) -> Vec<(i64, i64)> {
+    poly["vertices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| (v["x"].as_i64().unwrap(), v["y"].as_i64().unwrap()))
+        .collect()
+}
+
+#[tokio::test]
+async fn ocr_text_detection_matches_cloud_vision_shape() {
+    let (mock_addr, mock) = spawn_mock().await;
+    let (addr, _) = spawn_gateway_endpoints(mock_addr, OCR_ONLY).await;
+
+    let body = annotate_body(&make_text_png(), json!([{ "type": "TEXT_DETECTION" }]));
+    let (status, v) = post_annotate(addr, "?key=test-key-1", &body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let r = &v["responses"][0];
+    assert!(r.get("error").is_none(), "{r}");
+
+    let ann = r["textAnnotations"].as_array().unwrap();
+    assert_eq!(ann[0]["description"], "HI YOU\n");
+    assert_eq!(ann[1]["description"], "HI");
+    assert_eq!(ann[2]["description"], "YOU");
+    assert_eq!(ann.len(), 3);
+    // Line box: component 159x29 px grown by DB unclip (d = 18.39).
+    let line = vertices(&ann[0]["boundingPoly"]);
+    assert_eq!(line, vec![(22, 42), (217, 42), (217, 107), (22, 107)]);
+    // Words sit inside the line, in reading order.
+    let (hi, you) = (
+        vertices(&ann[1]["boundingPoly"]),
+        vertices(&ann[2]["boundingPoly"]),
+    );
+    assert!(
+        22 <= hi[0].0 && hi[1].0 <= you[0].0 && you[1].0 <= 217,
+        "{hi:?} {you:?}"
+    );
+
+    let full = &r["fullTextAnnotation"];
+    assert_eq!(full["text"], "HI YOU\n");
+    let page = &full["pages"][0];
+    assert_eq!(
+        (page["width"].as_u64(), page["height"].as_u64()),
+        (Some(320), Some(160))
+    );
+    let words = page["blocks"][0]["paragraphs"][0]["words"]
+        .as_array()
+        .unwrap();
+    assert_eq!(words.len(), 2);
+    let last = &words[1]["symbols"][2];
+    assert_eq!(last["text"], "U");
+    assert_eq!(last["property"]["detectedBreak"]["type"], "LINE_BREAK");
+    assert_eq!(page["blocks"][0]["blockType"], "TEXT");
+
+    // Detector then recognizer, one batch.
+    assert_eq!(
+        mock.seen.lock().unwrap().models,
+        vec!["ppocr-det", "ppocr-rec"]
+    );
+}
+
+#[tokio::test]
+async fn ocr_region_only_mode_skips_recognition() {
+    let (mock_addr, mock) = spawn_mock().await;
+    let (addr, _) = spawn_gateway_endpoints(mock_addr, OCR_ONLY).await;
+
+    let body = annotate_body(
+        &make_text_png(),
+        json!([{ "type": "TEXT_REGION_DETECTION" }]),
+    );
+    let (status, v) = post_annotate(addr, "?key=test-key-1", &body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let r = &v["responses"][0];
+    assert!(r.get("textAnnotations").is_none(), "{r}");
+    let regions = r["textRegionAnnotations"].as_array().unwrap();
+    assert_eq!(regions.len(), 1);
+    assert_eq!(
+        vertices(&regions[0]["boundingPoly"]),
+        vec![(22, 42), (217, 42), (217, 107), (22, 107)]
+    );
+    assert!((regions[0]["score"].as_f64().unwrap() - 0.9).abs() < 1e-3);
+    assert_eq!(mock.seen.lock().unwrap().models, vec!["ppocr-det"]);
+
+    // Both modes at once: regions *and* text (enum numbers as REST clients send).
+    let body = annotate_body(
+        &make_text_png(),
+        json!([{ "type": 5 }, { "type": "TEXT_REGION_DETECTION" }]),
+    );
+    let (_, v) = post_annotate(addr, "?key=test-key-1", &body).await;
+    let r = &v["responses"][0];
+    assert_eq!(r["textAnnotations"][0]["description"], "HI YOU\n");
+    assert_eq!(r["textRegionAnnotations"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn ocr_auth_and_errors_use_google_envelopes() {
+    let (mock_addr, _m) = spawn_mock().await;
+    let (addr, _) = spawn_gateway_endpoints(mock_addr, OCR_ONLY).await;
+    let body = annotate_body(&make_text_png(), json!([{ "type": "TEXT_DETECTION" }]));
+
+    // No key / wrong key: 401 with the Google error envelope.
+    let (status, v) = post_annotate(addr, "", &body).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(v["error"]["code"], 401);
+    assert_eq!(v["error"]["status"], "UNAUTHENTICATED");
+    let (status, _) = post_annotate(addr, "?key=nope", &body).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // x-goog-api-key header and Bearer both work.
+    for (h, val) in [
+        ("x-goog-api-key", "test-key-2"),
+        ("authorization", "Bearer test-key-1"),
+    ] {
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/v1/images:annotate"))
+            .header(h, val)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{h}");
+    }
+
+    // Per-image failures: HTTP 200, error in responses[i] (INVALID_ARGUMENT).
+    let (_, v) = post_annotate(
+        addr,
+        "?key=test-key-1",
+        &json!({ "requests": [
+            { "image": { "content": "not base64!" }, "features": [{ "type": "TEXT_DETECTION" }] },
+            { "image": { "source": { "gcsImageUri": "gs://b/o" } }, "features": [{ "type": "TEXT_DETECTION" }] },
+            { "image": { "content": "" }, "features": [{ "type": "LABEL_DETECTION" }] },
+            { "image": { "content": "" }, "features": [] }
+        ]}),
+    )
+    .await;
+    let rs = v["responses"].as_array().unwrap();
+    assert_eq!(rs.len(), 4);
+    for r in rs {
+        assert_eq!(r["error"]["code"], 3, "{r}");
+    }
+    assert!(
+        rs[2]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("LABEL_DETECTION")
+    );
+
+    // A blank image yields an empty response object, as Cloud Vision does.
+    let blank = {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::RgbImage::new(64, 64)
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .unwrap();
+        buf.into_inner()
+    };
+    let (_, v) = post_annotate(
+        addr,
+        "?key=test-key-1",
+        &annotate_body(&blank, json!([{ "type": "TEXT_DETECTION" }])),
+    )
+    .await;
+    assert_eq!(v["responses"][0], json!({}));
+
+    // Batch-level problems fail the whole call.
+    let (status, v) = post_annotate(addr, "?key=test-key-1", &json!({ "requests": [] })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(v["error"]["status"], "INVALID_ARGUMENT");
+    let many = json!({ "requests": vec![body["requests"][0].clone(); 17] });
+    let (status, _) = post_annotate(addr, "?key=test-key-1", &many).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn endpoints_are_mounted_only_when_enabled() {
+    let (mock_addr, _m) = spawn_mock().await;
+    let jpeg = make_test_jpeg();
+
+    // OCR only: /predict is not served.
+    let (addr, _) = spawn_gateway_endpoints(mock_addr, OCR_ONLY).await;
+    let (status, _) = post_predict(addr, "test-key-1", mp_file(&jpeg)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Detect only (explicit form): OCR is not served.
+    let (addr, _) = spawn_gateway_endpoints(
+        mock_addr,
+        "  detect: { model: yolo26n, api_keys: [test-key-1] }\n  \
+         ocr: { model: ppocr-det, api_keys: [test-key-1], enabled: false }",
+    )
+    .await;
+    let body = annotate_body(&make_text_png(), json!([{ "type": "TEXT_DETECTION" }]));
+    let (status, _) = post_annotate(addr, "?key=test-key-1", &body).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Both from one gateway; /health reports each endpoint.
+    let (addr, _) = spawn_gateway_endpoints(
+        mock_addr,
+        "  detect: { model: yolo26n, api_keys: [test-key-1] }\n  \
+         ocr: { model: ppocr-det, api_keys: [test-key-1] }",
+    )
+    .await;
+    let (status, v) = post_predict(addr, "test-key-1", mp_file(&jpeg)).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_openapi_contract(&v);
+    let (status, v) = post_annotate(addr, "?key=test-key-1", &body).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(
+        v["responses"][0]["textAnnotations"][0]["description"],
+        "HI YOU\n"
+    );
+    let h: Value = reqwest::get(format!("http://{addr}/health"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(h["status"], "healthy");
+    assert_eq!(h["endpoints"]["detect"]["status"], "healthy");
+    assert_eq!(h["endpoints"]["ocr"]["model"], "ppocr-det");
+}
+
+#[tokio::test]
+async fn model_task_must_match_its_endpoint() {
+    let (mock_addr, _m) = spawn_mock().await;
+    let (addr, state) = start_gateway_endpoints(
+        mock_addr,
+        "  ocr: { model: yolo26n, api_keys: [test-key-1] }",
+    )
+    .await;
+    for _ in 0..100 {
+        if !state.load_errors().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let err = state.load_errors().join("");
+    assert!(err.contains("is a 'detect' model"), "{err}");
+    let body = annotate_body(&make_text_png(), json!([{ "type": "TEXT_DETECTION" }]));
+    let (status, v) = post_annotate(addr, "?key=test-key-1", &body).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+    assert_eq!(v["error"]["status"], "UNAVAILABLE");
+}
+
+#[tokio::test]
+async fn each_service_accepts_only_its_own_keys() {
+    let (mock_addr, _m) = spawn_mock().await;
+    let (addr, _) = spawn_gateway_endpoints(
+        mock_addr,
+        "  detect: { model: yolo26n, api_keys: [detect-key, shared-key] }\n  \
+         ocr: { model: ppocr-det, api_keys: [ocr-key, shared-key] }",
+    )
+    .await;
+    let jpeg = make_test_jpeg();
+    let body = annotate_body(&make_text_png(), json!([{ "type": "TEXT_DETECTION" }]));
+
+    for (key, detect, ocr) in [
+        ("detect-key", StatusCode::OK, StatusCode::UNAUTHORIZED),
+        ("ocr-key", StatusCode::UNAUTHORIZED, StatusCode::OK),
+        ("shared-key", StatusCode::OK, StatusCode::OK),
+    ] {
+        let (status, _) = post_predict(addr, key, mp_file(&jpeg)).await;
+        assert_eq!(status, detect, "/predict with {key}");
+        let (status, _) = post_annotate(addr, &format!("?key={key}"), &body).await;
+        assert_eq!(status, ocr, "/v1/images:annotate with {key}");
+    }
 }
